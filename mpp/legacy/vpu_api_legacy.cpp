@@ -31,7 +31,6 @@
 #include "mpp_frame.h"
 
 RK_U32 vpu_api_debug = 0;
-static RK_U32 avaya_surface_en = 0;
 
 static MppFrameFormat vpu_pic_type_remap_to_mpp(EncInputPictureType type)
 {
@@ -112,6 +111,8 @@ static MPP_RET vpu_api_set_enc_cfg(MppCtx mpp_ctx, MppApi *mpi,
     RK_S32 tsvcx_en = (cfg->cabacInitIdc >> 16) & 0xffff;
     RK_S32 rc_mode  = cfg->rc_mode;
     RK_U32 change   = 0;
+    RK_S32 hor_stride = cfg->reserved[1];
+    RK_S32 ver_stride = cfg->reserved[2];
 
     mpp_log("setup encoder rate control config:\n");
     mpp_log("width %4d height %4d format %d\n", width, height, fmt);
@@ -127,7 +128,8 @@ static MPP_RET vpu_api_set_enc_cfg(MppCtx mpp_ctx, MppApi *mpi,
     if (NULL == old) {
         change = MPP_ENC_PREP_CFG_CHANGE_INPUT | MPP_ENC_PREP_CFG_CHANGE_FORMAT;
     } else {
-        if (old->width != width || old->height != height)
+        if (old->width != width || old->height != height
+            || old->reserved[1] != hor_stride || old->reserved[2] != ver_stride)
             change |= MPP_ENC_PREP_CFG_CHANGE_INPUT;
         if (old->format != fmt)
             change |= MPP_ENC_PREP_CFG_CHANGE_INPUT | MPP_ENC_PREP_CFG_CHANGE_FORMAT;
@@ -137,14 +139,9 @@ static MPP_RET vpu_api_set_enc_cfg(MppCtx mpp_ctx, MppApi *mpi,
         prep_cfg->change     = change;
         prep_cfg->width      = width;
         prep_cfg->height     = height;
-        prep_cfg->hor_stride = MPP_ALIGN(width, 16);
-        prep_cfg->ver_stride = MPP_ALIGN(height, 8);
+        prep_cfg->hor_stride = hor_stride ? hor_stride : MPP_ALIGN(width, 16);
+        prep_cfg->ver_stride = ver_stride ? ver_stride : MPP_ALIGN(height, 8);
         prep_cfg->format     = fmt;
-
-        if (avaya_surface_en) {
-            prep_cfg->hor_stride = width;
-            prep_cfg->ver_stride = height;
-        }
 
         vpu_api_dbg_func("w:h= %dx%d, hor:ver = %dx%d\n",
                          prep_cfg->width, prep_cfg->height,
@@ -179,19 +176,19 @@ static MPP_RET vpu_api_set_enc_cfg(MppCtx mpp_ctx, MppApi *mpi,
     if (change) {
         rc_cfg->change  = change;
         if (rc_mode == 0) {
-        /* 0 - constant qp mode: fixed qp */
-        rc_cfg->rc_mode     = MPP_ENC_RC_MODE_VBR;
-        rc_cfg->quality     = MPP_ENC_RC_QUALITY_CQP;
-        rc_cfg->bps_target  = -1;
-        rc_cfg->bps_max     = -1;
-        rc_cfg->bps_min     = -1;
+            /* 0 - constant qp mode: fixed qp */
+            rc_cfg->rc_mode     = MPP_ENC_RC_MODE_VBR;
+            rc_cfg->quality     = MPP_ENC_RC_QUALITY_CQP;
+            rc_cfg->bps_target  = -1;
+            rc_cfg->bps_max     = -1;
+            rc_cfg->bps_min     = -1;
         } else if (rc_mode == 1) {
-        /* 1 - constant bitrate: small bps range */
-        rc_cfg->rc_mode     = MPP_ENC_RC_MODE_CBR;
-        rc_cfg->quality     = MPP_ENC_RC_QUALITY_MEDIUM;
-        rc_cfg->bps_target  = bps;
-        rc_cfg->bps_max     = bps * 17 / 16;
-        rc_cfg->bps_min     = bps * 15 / 16;
+            /* 1 - constant bitrate: small bps range */
+            rc_cfg->rc_mode     = MPP_ENC_RC_MODE_CBR;
+            rc_cfg->quality     = MPP_ENC_RC_QUALITY_MEDIUM;
+            rc_cfg->bps_target  = bps;
+            rc_cfg->bps_max     = bps * 17 / 16;
+            rc_cfg->bps_min     = bps * 15 / 16;
         } else {
             mpp_err("invalid vpu rc mode %d\n", rc_mode);
         }
@@ -571,9 +568,6 @@ RK_S32 VpuApiLegacy::init(VpuCodecContext *ctx, RK_U8 *extraData, RK_U32 extra_s
         mpp_err("found invalid context input");
         return MPP_ERR_NULL_PTR;
     }
-
-    mpp_env_get_u32("avaya.video.encode.surface", &avaya_surface_en, 0);
-    vpu_api_dbg_func("avaya.video.encode.surface %d", avaya_surface_en);
 
     if (CODEC_DECODER == ctx->codecType) {
         type = MPP_CTX_DEC;
@@ -1153,8 +1147,8 @@ RK_S32 VpuApiLegacy::encode(VpuCodecContext *ctx, EncInputStream_t *aEncInStrm, 
     RK_S32 fd           = -1;
     RK_U32 width        = ctx->width;
     RK_U32 height       = ctx->height;
-    RK_U32 hor_stride   = MPP_ALIGN(width,  16);
-    RK_U32 ver_stride   = MPP_ALIGN(height, 8);
+    RK_U32 hor_stride   = enc_cfg.reserved[1] ? enc_cfg.reserved[1] : MPP_ALIGN(width, 16);
+    RK_U32 ver_stride   = enc_cfg.reserved[2] ? enc_cfg.reserved[2] : MPP_ALIGN(height, 8);
     MppFrame    frame   = NULL;
     MppPacket   packet  = NULL;
     MppBuffer   pic_buf = NULL;
@@ -1390,8 +1384,8 @@ RK_S32 VpuApiLegacy::encoder_sendframe(VpuCodecContext *ctx, EncInputStream_t *a
 
     RK_U32 width        = ctx->width;
     RK_U32 height       = ctx->height;
-    RK_U32 hor_stride   = MPP_ALIGN(width,  16);
-    RK_U32 ver_stride   = MPP_ALIGN(height, 8);
+    RK_U32 hor_stride   = enc_cfg.reserved[1] ? enc_cfg.reserved[1] : MPP_ALIGN(width, 16);
+    RK_U32 ver_stride   = enc_cfg.reserved[2] ? enc_cfg.reserved[2] : MPP_ALIGN(height, 8);
     RK_S64 pts          = aEncInStrm->timeUs;
     RK_S32 fd           = aEncInStrm->bufPhyAddr;
     RK_U32 size         = aEncInStrm->size;
@@ -1405,11 +1399,9 @@ RK_S32 VpuApiLegacy::encoder_sendframe(VpuCodecContext *ctx, EncInputStream_t *a
         goto FUNC_RET;
     }
 
-    if (avaya_surface_en) {
-        hor_stride = width;
-        ver_stride = height;
-    }
-    vpu_api_dbg_func("dhq, sendframe w:h=%dx%d, size =0x%08x\n", ctx->width, ctx->height, aEncInStrm->size);
+    vpu_api_dbg_func("w:h=%dx%d, size =0x%08x, hor_stride:ver_stride=%dx%d\n",
+                     ctx->width, ctx->height, aEncInStrm->size,
+                     hor_stride, ver_stride);
 
     mpp_frame_set_width(frame, width);
     mpp_frame_set_height(frame, height);
